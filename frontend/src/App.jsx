@@ -1,10 +1,20 @@
 import { useState, useEffect } from 'react';
+import { createClient } from '@supabase/supabase-js';
 import './index.css';
 
 // Automatically use the live Google Cloud URL if deployed, otherwise fallback to localhost!
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000/api";
 
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
 function App() {
+  const [session, setSession] = useState(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  
   const [currentView, setCurrentView] = useState('search'); // 'search' or 'watchlist'
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -12,17 +22,62 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // Check for an active user session on startup
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    
+    return () => subscription.unsubscribe();
+  }, []);
+
   // Fetch watchlist whenever calculating the watchlist view
   useEffect(() => {
-    if (currentView === 'watchlist') {
+    if (session && currentView === 'watchlist') {
       fetchWatchlist();
     }
-  }, [currentView]);
+  }, [currentView, session]);
+
+  // --- AUTH METHODS ---
+  const handleSignUp = async (e) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) alert(error.message);
+    else alert('Success! Try logging in right now!');
+    setAuthLoading(false);
+  };
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) alert(error.message);
+    setAuthLoading(false);
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  // --- API METHODS ---
+  // Helper to get auth headers easily
+  const getHeaders = () => {
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session?.access_token}`
+    };
+  };
 
   const fetchWatchlist = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/watchlist`);
+      const res = await fetch(`${API_BASE}/watchlist`, { headers: getHeaders() });
+      if (!res.ok) throw new Error("Failed to fetch watchlist");
       const data = await res.json();
       setWatchlist(data);
     } catch (err) {
@@ -41,12 +96,13 @@ function App() {
     
     try {
       const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(searchQuery)}`);
+      // Notice we don't need auth headers for totally public routes like searching OMDB!
+      
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.detail || "Search failed");
       }
       const data = await res.json();
-      // The OMDB API returns an array inside the `Search` key
       setSearchResults(data.Search || []);
     } catch (err) {
       setError(err.message);
@@ -59,7 +115,6 @@ function App() {
       imdb_id: movie.imdbID,
       title: movie.Title,
       year: movie.Year,
-      // Some movies don't have a poster, we conditionally handle the 'N/A' string
       poster_url: movie.Poster === 'N/A' ? '' : movie.Poster,
       type: movie.Type
     };
@@ -67,7 +122,7 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/watchlist`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders(),
         body: JSON.stringify(item)
       });
       if (!res.ok) throw new Error("Failed to add");
@@ -81,7 +136,8 @@ function App() {
   const removeFromWatchlist = async (imdb_id) => {
     try {
       await fetch(`${API_BASE}/watchlist/${imdb_id}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: getHeaders(), // Security: Must prove who we are to delete
       });
       fetchWatchlist(); // Refresh the list automatically
     } catch (err) {
@@ -89,11 +145,52 @@ function App() {
     }
   };
 
+  // --- RENDER LOGIC ---
+  
+  // If no user is logged in, only show the Auth screen!
+  if (!session) {
+    return (
+      <div className="app-container" style={{maxWidth: '400px', marginTop: '10vh'}}>
+         <h1 style={{textAlign: 'center', marginBottom: '2rem'}} className="logo">PopcornTracker</h1>
+         <div className="movie-card" style={{padding: '2rem'}}>
+            <h2 style={{marginBottom: '1.5rem'}}>Sign In to Your Watchlist</h2>
+            <form onSubmit={handleLogin} style={{display: 'flex', flexDirection: 'column', gap: '1rem'}}>
+              <input 
+                 type="email" 
+                 placeholder="Email" 
+                 className="search-input" 
+                 style={{backgroundColor: 'var(--bg-color)', border: '1px solid #333'}}
+                 value={email} 
+                 onChange={(e) => setEmail(e.target.value)}
+                 required 
+              />
+              <input 
+                 type="password" 
+                 placeholder="Password" 
+                 className="search-input"
+                 style={{backgroundColor: 'var(--bg-color)', border: '1px solid #333'}}
+                 value={password} 
+                 onChange={(e) => setPassword(e.target.value)}
+                 required 
+              />
+              <button type="submit" className="btn-primary" disabled={authLoading}>
+                {authLoading ? 'Loading...' : 'Sign In'}
+              </button>
+              <button type="button" className="btn-action" onClick={handleSignUp} disabled={authLoading}>
+                Create an Account
+              </button>
+            </form>
+         </div>
+      </div>
+    );
+  }
+
+  // If user IS logged in, show the main application!
   return (
     <div className="app-container">
       <header>
         <div className="logo">PopcornTracker</div>
-        <nav>
+        <nav style={{display: 'flex', alignItems: 'center'}}>
           <button 
             className={currentView === 'search' ? 'active' : ''} 
             onClick={() => setCurrentView('search')}
@@ -105,6 +202,12 @@ function App() {
             onClick={() => setCurrentView('watchlist')}
           >
             My Watchlist
+          </button>
+          
+          <div style={{width: 1, height: 20, backgroundColor: 'rgba(255,255,255,0.2)', marginLeft: '1.5rem'}}></div>
+          
+          <button onClick={handleLogout} className="btn-action btn-danger" style={{marginLeft: '1.5rem', padding: '0.4rem 0.8rem'}}>
+            Sign Out
           </button>
         </nav>
       </header>
@@ -147,7 +250,7 @@ function App() {
           </div>
         ) : (
           <div className="view-watchlist">
-            <h2 style={{marginBottom: '2rem'}}>Your Saved Movies & Shows</h2>
+            <h2 style={{marginBottom: '2rem'}}>Your Private Watchlist</h2>
             {loading && <div className="loading">Loading your watchlist...</div>}
             
             <div className="movie-grid">

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from fastapi import Header, Depends
 
 # Load environment variables from .env file expressly relative to this folder
 env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -42,6 +43,21 @@ class WatchlistItem(BaseModel):
     poster_url: str
     type: str
 
+# --- AUTHENTICATION ---
+async def get_current_user(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authentication token")
+    
+    token = authorization.split(" ")[1]
+    
+    # Supabase verifies the JWT token over the network against your project securely
+    auth_response = supabase.auth.get_user(token)
+    
+    if not auth_response or not auth_response.user:
+        raise HTTPException(status_code=401, detail="Invalid token or session expired")
+        
+    return auth_response.user
+
 # --- ENDPOINTS ---
 @app.get("/")
 def read_root():
@@ -65,20 +81,22 @@ async def search_omdb(q: str):
         return data
 
 @app.get("/api/watchlist")
-def get_watchlist():
-    """Retrieves all saved items from the Supabase watchlist table."""
-    res = supabase.table("watchlist").select("*").order("created_at", desc=True).execute()
+def get_watchlist(user = Depends(get_current_user)):
+    """Retrieves all saved items from the Supabase watchlist table for the logged-in user."""
+    res = supabase.table("watchlist").select("*").eq("user_id", user.id).order("created_at", desc=True).execute()
     return res.data
 
 @app.post("/api/watchlist")
-def add_to_watchlist(item: WatchlistItem):
-    """Saves a new movie/show to the Supabase watchlist."""
-    # Convert Pydantic model to dict and insert into Supabase
-    res = supabase.table("watchlist").insert(item.model_dump()).execute()
+def add_to_watchlist(item: WatchlistItem, user = Depends(get_current_user)):
+    """Saves a new movie/show to the Supabase watchlist, linking it to the user."""
+    item_dict = item.model_dump()
+    item_dict["user_id"] = user.id # Attach the authenticated user's ID to the saved movie
+    res = supabase.table("watchlist").insert(item_dict).execute()
     return res.data
 
 @app.delete("/api/watchlist/{imdb_id}")
-def remove_from_watchlist(imdb_id: str):
+def remove_from_watchlist(imdb_id: str, user = Depends(get_current_user)):
     """Removes an item from the watchlist."""
-    res = supabase.table("watchlist").delete().eq("imdb_id", imdb_id).execute()
+    # Ensure they can only delete their own movies!
+    res = supabase.table("watchlist").delete().eq("imdb_id", imdb_id).eq("user_id", user.id).execute()
     return {"message": f"Removed {imdb_id} from watchlist"}
